@@ -1,0 +1,1372 @@
+
+########################################
+# This is an example of my perl coding #
+########################################
+
+#!/usr/bin/perl
+
+### THIS IS NOT A VERSION INTENDED FOR GENERAL USE; IT HAS BUGS.
+### YOU HAVE BEEN WARNED.
+
+###
+### j - a perl based livejournal client grown into a full featured client which
+###     hopefully is still easy to modify.
+###
+### (porovaara@yahoo.com)
+
+### Usage:
+### j -ARGS (try j -help)
+
+### ToDo:
+### . make sure db calls are portable
+### X add db option to config file
+### X add ability to have client create appropriate tables; table format
+###   needs to be changed as it is missing date and some fields are too small
+### . clean up "clean up" routines
+### X move -edit code to seperate routine
+### X edit after preview doesn't work
+### X don't start itunes if it isn't already running
+### . fix checking for friends
+### . add option for parsing XML file to load the DB
+### . % doesn't get escaped right in a series of characters
+### ... finishing the above makes this version 500
+### . add a routine to pick the cities for the weather function
+### . make sure compatible across FreeBSD, OSX, Lunix, Windows (with cygwin)
+### . fix -pedit sorting
+### ... that makes version 501; will submit client to LJ at this point
+
+### Bugs:
+### . sorts entries wrong on pedit
+### . the feature to push up entries left around for when LJ is down seems
+###   to sometimes break and leave dead entries in /tmp
+### . pedit messes up the subject on the 1st entry
+
+### Features:
+### . backs up to a local DB (currently setup for PostgreSQL)
+### . grabs info out of iTunes if on Mac and the .rcfile says to
+### . can check for new entries by your friends - LIES, BROKEN
+### . pager preference in rc file (any unix pager)
+### . spell checker preference in rc file (any unix spellChecker)
+### . handles !@#$... properly in any field
+### . archiving (now fixored) (soon to be updated)
+### . supports mood/music
+### . can delete entries (no confirmation, be a man!)
+### . supports pictures (with BOX select code mod from Ravi)
+### . external editor or internal line based editor
+### . editor template preloads (bbs style b0y)
+### . can use an external spell program for spell checking
+### . preview (for those drunken entries) now with pager support!
+### . store username and maybe password (if you want to)
+### . edit of most recent entry (-edit)
+### . edit of any one of the most 20 entries (-pedit)
+### . all fields can be populated on the command line (-...)
+### . shove option to turn off output (-shove)
+
+###
+### randomish for the future
+###
+
+###
+### required
+###
+use IO::Socket;
+#use DBD::Pg;				# if using PostgreSQL
+#					# if using MySQL
+
+###
+### just here for now
+###
+# these are OVERRIDDEN by an .rc file
+$server = "www.livejournal.com";
+$editor = "vi"; # "builtin" or name of binary to run, ex: "vi"
+$preview = 1;   # 1 means show a preview before sending
+$template = 1;  # 1 means throwout a template and parse it later on
+$archive = 1;	# 1 means keep an archive
+$clogin = 1;	# login the client; not overriden by rcfile
+$getWeather = 1;# not in the rc file currently
+# this needs to be changed...
+#$weatherURL = "http://www.srh.noaa.gov/data/forecasts/GAZ032.php?warncounty=GAC067&city=Marietta";
+$weatherURL = "http://www.srh.noaa.gov/data/forecasts/CAZ006.php?warncounty=CAC075&city=San+Francisco";
+
+###
+### special vars; dont mess with these unless you know what you are doing
+###
+$rcfile = $ENV{'HOME'} . "/.j.rcfile"; # name of the j client control file
+$archiveDir = $ENV{'HOME'} . "/.j.archive"; # directory for archives
+$pid = $$;				# grab a consistent PID we can use
+$tempFile = "/tmp/lj.$pid.unsent";	# where we will store the entry when
+                                        # using an external editor
+$cv = "j-TREPIDATION/499.93a"; # version, duh
+$sizeOfTemplate = 6; 		# set to size of the template header
+$updatercfile = 1;   		# if 1 will throw some stuff at the end of
+				# the rcfile
+$lengthOfConfFile = 15;		# we + this everytime we add new features to
+                                # conf file. so we can let people know they
+                                # might not have all the new features in...
+$hostname = `hostname`;	chop($hostname);	# grab the hostname
+$osType = `uname -s`; chop($osType);		# os type
+$onMac = 1 if (`uname -a` =~ /Mac/);	# see if we are on a mac, this is
+                                        # OSX specific because it calls out to
+                                        # applescript
+$|=1;				# unbuffered; yes i write too many CGIs
+
+###
+### zero_out.
+###
+# zero every thing out; should be moved up top and explanations for each
+# var added after it 
+sub zero_out {
+  $body="";		# contains the body of an entry
+  $c=0;			# temp counter var
+  $createdEntry=0;	# have we created an entry with edit yet? 
+  $day="";		# day
+  $editMode="";		# lets certain ifs know if it is a new post or edit
+  $express=""; 		# express mode turns off some messages
+  $g="";		# garbage; gets used for throw away stuff
+  $getString="";	# sent when retrieve something from lj
+  $gotSubject=0;	# used to allow multiple subject: in a post
+  $gotMusic=0;		# used to allow multiple music: in a post
+  $gotMood=0;		# used to allow multiple mood: in a post
+  $hour="";		# hour of posting
+  $iTunesRunning="";    # used to see if iTunes is already running
+  $l1=0;		# used when we get the length of something
+  $ljItem="0";		# item ID used by lj on their servers
+  $minute="";		# minutes for posting
+  $month="";		# month var
+  $mood="";		# mood for an entry
+  $music="";		# music for an entry
+  %pickw=();		# available pictures (ravi)
+  $picture="";		# picture keyword to use
+  $output="";		# $body sent to lj after some massaging
+  $security="";		# who can view the entries we create
+  $subject="";		# subject of an entry
+  $updateString="";	# what we send to create or edit an entry 
+  $t=0;			# temp counter var
+  $temp="";		# string used for temporary holding of vars
+  $updatedEntryInDB=0;  # did we update an entry in the DB?
+  $wait=0;		# used to decide if we wait on input 
+  $warning=0;		# used to warn on config problems
+  $XMLFile="";		# file to parse for bulk DB loads
+}
+
+###
+### check_for_rcfile.
+###
+sub check_for_rcfile {
+  # first run? print out a message here
+  unless (-f $rcfile) {
+    print "--- creating $rcfile (first run) ---\n";
+  }
+
+  # create the archive dir
+  unless (-d $archiveDir) {
+    print "--- creating archive directory ---\n";
+    system "mkdir $archiveDir";
+    system "chmod 700 $archiveDir";
+  }
+
+  # check for rcfile and create it if it doesnt exist
+  unless (-f $rcfile) {
+    open(TMP,">$rcfile");
+    print TMP "username: YOUR_USERNAME_HERE\n";
+    print TMP "password: either put it here or blank everything after colon out\n";
+    print TMP "site    : $server\n";
+    print TMP "editor  : vi\n";
+    print TMP "pager   : more\n";
+    print TMP "spellchk: ispell\n";
+    print TMP "preview : 1\n";
+    print TMP "template: 1\n";
+    print TMP "archive : 1\n";
+    print TMP "iTunes  : 0\n";
+    print TMP "dbBackup: 0\n";
+    print TMP "dbName  : ljentries # these two are only valid if dbBackup is 1\n";
+    print TMP "tblName : entries   # these two are only valid if dbBackup is 1\n";
+    print TMP "last run: 00:00.00/00/00\n";
+    print TMP "num runs: 0\n";
+    print TMP "### YOU MUST DELETE THIS LINE OR j WILL NOT RUN. ###\n";
+    close(TMP);
+    print "--- You have to edit $rcfile! ---\n";
+    exit;
+  }
+}
+
+###
+### parse_rcfile.
+###
+sub parse_rcfile {
+  # open the rcfile usually located in the user hame named .j.rcfile
+  $c = 0;
+  open(TMP,"$rcfile");
+  while(<TMP>) {
+    $_ =~ s/ //;	# get rid of a space we might need some
+    chop;
+    if ($_ =~ /username/) {
+      ($g,$user) = split(/:/,$_);
+      if ($user eq "" || $user eq "YOUR_USERNAME_HERE") {
+        print "--- please edit $rcfile and enter your username ---\n";
+        exit;
+      }
+    }
+    if ($_ =~ /password/) {
+      ($g,$password) = split(/:/,$_);
+      # check for people who forget to blank out password line
+      $password = "" if substr($password,0,9) eq "eitherput";
+    }
+    if ($_ =~ /site/) {
+      ($g,$server) = split(/:/,$_);
+      if ($server eq "") {
+        print "--- no site in $rcfile using the default ($server) ---\n";
+        $site = $server;
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /editor/) {
+      ($g,$editor) = split(/:/,$_);
+      if ($editor eq "") {
+        print "--- no editor in $rcfile using the default (vi) ---\n";
+        $editor = "vi";
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /spellchk/) {
+      ($g,$spellCheck) = split(/:/,$_);
+      if ($spellCheck eq "") {
+        print "--- no spell check program in $rcfile using the default (ispell) ----\n";
+        $spellCheck = "ispell";
+        $warning = 1;
+      }
+      if ($spellCheck eq "1") {			# catch for old rcfiles
+        print "--- spellchk in the rcfile should now contain a program name (ispell) ---\n";
+        $warning = 1;
+        $spellCheck = "ispell";
+      }
+      $spellCheckProgram = `which $spellCheck`; chop($spellCheckProgram);
+    }
+    if ($_ =~ /pager/) {
+      ($g,$pager) = split(/:/,$_);
+      if ($pager eq "") {
+        print "--- no pager in $rcfile using the default (more) ----\n";
+        $pager = "more";
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /preview/) {
+      ($g,$preview) = split(/:/,$_);
+      if ($preview eq "") {
+        print "--- no preview in $rcfile using the default (on) ---\n";
+        $preview = 1;
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /template/) {
+      ($g,$template) = split(/:/,$_);
+      if ($template eq "") {
+        print "--- no template in $rcfile using the default (on) ---\n";
+        $template = 1;
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /iTunes/) {
+      ($g,$checkiTunes) = split(/:/,$_,2);
+      if ($checkiTunes eq "") {
+        print "--- no iTunes in $rcfile using the default (off) ---\n";
+        $checkiTunes = 0;
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /dbBackup/) {
+      ($g,$dbBackup) = split(/:/,$_,2);
+      if ($dbBackup eq "") {
+        print "--- no dbBackup in $rcfile using the default (off) ---\n";
+        $dbBackup = 0;
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /dbName/ && $dbBackup eq "1") {
+      ($g,$dbName) = split(/:/,$_,2);
+      $dbName =~ s/ //g;
+      if ($dbName eq "") {
+        print "--- no dbName in $rcfile using the default (ljentries)) ---\n";
+        $dbName = "ljentries";
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /tblName/ && $dbBackup eq "1") {
+      ($g,$tblName) = split(/:/,$_,2);
+      $tblName =~ s/ //g;
+      if ($tblName eq "") {
+        print "--- no tblName in $rcfile using the default (entries)) ---\n";
+        $tblName = "entries";
+        $warning = 1;
+      }
+    }
+    if ($_ =~ /lastrun/) {
+      ($g,$lastRun) = split(/:/,$_,2);
+    }
+    if ($_ =~ /numruns/) {
+      ($g,$num) = split(/:/,$_);
+    }
+    if ($_ =~ /###/) {
+      print "--- You have to edit $rcfile! ---\n";
+      exit;
+    }
+    $c++;
+  }
+  if ($c < $lengthOfConfFile) {
+    print "\n--- there are new features not actived in your conf file please view ---\n";
+    print "--- the source to see how to add this new functionality              ---\n\n";
+    $warning = 1;
+  }
+  if ($warning) {
+    print "--- sleeping for 10 seconds because of incorrect $rcfile ---\n";
+    sleep 10;
+  }
+}
+
+###
+### get_date.
+###
+sub get_date {
+   ($g,$minute,$hour,$day,$month,$year,$g,$g,$g) = localtime();
+   $year = $year + 1900; 
+   $hour =~ s/ //g;
+   $minute =~ s/ //g;
+   $month =~ s/ //g;
+   $year =~ s/ //g;
+   $month = $month +1;
+}
+
+
+###
+### delete_entry.
+###
+sub delete_entry {
+#  $express = 1; # express mode because normal output looks funny on a delete
+  $getString = "mode=getevents&user=$user&password=$password&itemid=-1&selecttype=one";
+  $l1 = length($getString);
+  &open_connection;
+  print "--- retrieving (patience is a virtue) ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$getString\r
+EOF
+  @input = <$sock>;
+  close($sock);
+  # grab itemid for changes
+  $t = 0; # temp counter
+  while ($c < $#input+1) {
+    if (@input[$c] =~ /events_1_itemid/) {
+      $itemID = @input[$c+1];
+      $itemID =~ s/ //;
+      chop($itemID);
+    }
+    $c++;
+  }
+  # grab the sequence id out of the db
+  print "--- deleting entry: $itemID ---\n" unless $express;
+  $dbConnect = DBI->connect("dbi:Pg:dbname=ljentries");
+  # this is bad, because what if the most recent db thing doesn't match
+  # but putting an lj number here ties us into one db. what do do?
+  $dbResults = $dbConnect->prepare("SELECT MAX(auto_id) FROM entries");
+  $dbResults->execute;
+  $sequenceID = $dbResults->fetchrow;
+  # delete the old entry from the db
+  $dbResults = $dbConnect->prepare("DELETE FROM ONLY entries WHERE auto_id='$sequenceID'");
+  $dbResults->execute;
+  # clear out the values so when we upload to lj it erases the entry 
+  &zero_out;			# zero out the body/subject stuff
+  $editMode = 1;		# put us in edit mode
+  $express = 1;
+  $getWeather = 0;
+  &send_entry;			# call send entry
+  exit;				# exit
+}
+
+###
+### get_entry.
+###
+### grabs the most recent entry from the lj servers for editing
+###
+sub get_entry {
+  $itemID = "-1" unless $itemID;	# most recent entry if unspecified
+  $getString = "mode=getevents&user=$user&password=$password&selecttype=one&itemid=$itemID";
+  $l1 = length($getString);
+  &open_connection;
+  print "--- retrieving (patience is a virtue) ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$getString\r
+EOF
+  @input = <$sock>;
+  close($sock);
+  # time for lots of parsing
+  $c = 6; # this is to cut out the html header
+  while ($c < $#input+1) {
+    # the body to edit
+    if ((@input[$c] =~ /events_1_event/) && (!(@input[$c] =~ /events_1_eventtime/))) {
+      $body = @input[$c+1];
+      # change characters from escaped html back to normal 
+      &un_html_lize($body);
+    }
+    # the old time of posting
+    if (@input[$c] =~ /events_1_eventtime/) {
+      $time = @input[$c+1];
+      ($year,$month,$more) = split(/-/,$time,3);
+      ($day,$time) = split(/ /,$more,2);
+      ($hour,$minute,$g) = split(/:/,$time,3);
+    }
+    # the old subject
+    if (@input[$c] =~ /events_1_subject/) {
+      $subject = @input[$c+1];
+      $subject =~ s/  //;
+      chop($subject);
+    }
+    if (@input[$c] =~ /current_mood/) {
+      $mood = @input[$c+2];
+      $mood =~ s/  //;
+      chop($mood);
+    }
+    if (@input[$c] =~ /current_music/) {
+      $music = @input[$c+2];
+      $music =~ s/  //;
+      chop($music);
+    }
+    if (@input[$c] =~ /picture_keyword/) {
+      $picture = @input[$c+2];
+      $picture =~ s/  //;
+      chop($picture);
+    }
+    # grab itemid for changes
+    if (@input[$c] =~ /events_1_itemid/) {
+      $itemID = @input[$c+1];
+      $itemID =~ s/  //;
+      chop($itemID);
+     
+    }
+    if (@input[$c] =~ /events_1_security/) {
+      $security = @input[$c+1];
+      $security =~ s /  //;
+      chop($security);
+      $security = "friends" if $security eq "usemask";
+    }
+    $c++;
+  }
+  # grab the sequence id out of the db
+  #$dbConnect = DBI->connect("dbi:Pg:dbname=ljentries");
+  #$dbResults = $dbConnect->prepare("SELECT auto_id FROM entries where subject='$subject' and year='$year' and month='$month' and day='$day' and hour='$hour' and minute='$minute'");
+  #$dbResults->execute;
+  #$sequenceID = $dbResults->fetchrow;
+}
+
+###
+### get_past_entries.
+###
+### this routines call out to the LJ servers and grabs "header" information
+### on a specified number of posts and allows us to select one for editing.
+###
+sub get_past_entries {
+  $getString = "mode=getevents&user=$user&password=$password&selecttype=lastn&howmany=$numtopull";
+  $l1 = length($getString);
+  &open_connection;
+  print "--- retrieving old entries (patience is a virtue) ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$getString\r
+EOF
+  @input = <$sock>;
+  close($sock);
+  $c = 6; # this is to cut out the html header
+  $t = 0; # temp counter
+  while ($c < $#input+1) {
+    if (@input[$c] =~ /_subject/) {
+      $tempsubject = @input[$c+1];
+      $tempsubject =~ s/  //;
+      chop($tempsubject);
+      @tempsubjects[$t] = $tempsubject;
+    }
+    if (@input[$c] =~ /_eventtime/) {
+      $tempeventtime = @input[$c+1];
+      $tempeventtime =~ s/ //;
+      chop($tempeventtime);
+      @tempeventtimes[$t] = $tempeventtime;
+    }
+    if (@input[$c] =~ /_itemid/) {
+      $itemID = @input[$c+1];
+      $itemID =~ s/ //;
+      chop($itemID);
+      @itemids[$t] = $itemID; 
+      $t++;
+    }
+    $c++;
+  }
+  $t = #@itemids;
+  $t = $t - $numtopull;
+  $c = 0;
+  while ($c < $t) {
+    pop(@itemids);
+    $c++;
+  }
+  # print out the list of entries
+  print "-----+----+--------------------+---------------------------------------\n";
+  print "ID   |Num |       Time         |      Subject\n";
+  print "-----+----+--------------------+---------------------------------------\n";
+  $t=0;
+  while ($t < $numtopull) {
+    print "@itemids[$t] | $t  | @tempeventtimes[$t] | @tempsubjects[$t]\n" if $t<10;
+    print "@itemids[$t] | $t | @tempeventtimes[$t] | @tempsubjects[$t]\n" if $t>9;
+    $t++;
+  }
+  print "----------+----+--------------------+---------------------------------------\n";
+  # grab the number corresponding to the id we want to edit 
+  print "Enter the number of the entry you want to edit: " unless $express;
+  $input = <STDIN>;
+  chop($input);
+  print "\n" unless $express;
+  # do some sanity checking on the input; disgard crap
+  $input = "0" if $input < 0;
+  $input = "0" if $input > $numtopull;
+  # here is where we grab the right itemid
+  $itemID = @itemids[$input - 1];
+}
+
+###
+### check_args.
+###
+sub check_args {
+  # get the system date even if we aren't going to use it (for now)
+  &get_date;
+
+  # new foreach format to parse opts
+  foreach(@ARGV) {
+    if (($_ eq "-help") || ($_ eq "-?") || ($_ eq "-h")) {
+      print <<EOF;
+--- help ---
+j                   this is the normal way to run the program. depending
+                    on your rc file settings it will either launch an
+                    external editor or use the builtin editor to allow
+                    you to post stuff to $server
+-body=""            either a bunch of text or a reference to a file on
+                    filesystem by using file://path.to.file (NI)
+-checkFriends       check for new entries by your friends also -cf
+-createTable        connects to a DB and create a table for backing up
+                    entries
+-delete             delete the most recent entry 
+-edit               edits the most recent entry
+-help               what you are viewing now cutey
+-mood=""            set your mood n stuph 
+-music=""           set your music to whats in qoutes 
+-pedit=X            edit previous entries. this will pop up a list of the
+                    X most recent entries and let you choose one to edit.
+                    if you don't enter a number the default of 20 is used.
+-picture=""         pick a picture based on keywords
+-shove              pushes an entry up ignoring editor and preview settings
+                    requires external editor be enabled for now
+-subject="stuff"    set the subject to whatever you put in qoutes (max 255c)
+-time=XX:YY         XX is the hours (military style); YY is the minutes
+-version            print out the version number and exit
+-parseXML=Filename  batch load entries from an LJ XML file into a DB
+
+--- help --- (Ver: $cv)
+--- contact: porovaara\@yahoo.com ---
+EOF
+    exit;
+    }
+    # version
+    if ($_ =~ "-version") {
+      print "$cv\n";
+      exit;
+    }
+    # command line time
+    if ($_ =~ "-time") {
+      $tmptime = substr($_,6,5);
+      ($hour,$minute) = split(/:/,$tmptime);
+    }
+    # command line subject
+    if ($_ =~ "-subject") {
+      $subject = substr($_,9,length($_));
+    }
+    # command line mood
+    if ($_ =~ "-mood") {
+      $mood = substr($_,6,length($_));
+    }
+    # command line music
+    if ($_ =~ "-music") {
+      $music = substr($_,7,length($_));
+    }
+    # command line body
+    if ($_ =~ "-body") {
+      $body = substr($_,6,length($_));
+    }
+    # command line picture
+    if ($_ =~ "-picture") {
+      $picture = substr($_,9,length($_));
+    }
+    # shove... used to push up an entry with no editor or preview
+    if ($_ =~ "-shove") {
+      $express = 1;
+      $clogin = 0; #turn off userlogin for speed
+    }
+    # delete the most recent entry, this should be fun
+    if ($_ =~ "-delete") {
+      &delete_entry;
+    }
+    # check for new entries by friends
+    if ($_ =~ "-checkFriends" || $_ =~ "-cf") {
+      &check_friends;
+      exit(0);
+    }
+    # create a table in a database for backing entries up
+    if ($_ =~ "-createTable" || $_ =~ "-ct") {
+      &create_table;
+      exit(0);
+    }
+    # load an XML file into a DB
+    if ($_ =~ "-parseXML") {
+      $XMLFile = substr($_,10,length($_));
+      &parse_XML;
+      exit(0);
+    }
+    # edit the most recent entry
+    if (($_ =~ "-edit") || ($_ =~ "-pedit")) {
+      $editMode = 1;
+      $getString = "";
+      # we might a have an argument
+      if ($_ =~ "pedit") {
+        ($g,$numtopull) = split(/=/,$_,2);	# how many entries to pull with
+                                                # pedit? default is 20
+        $numtopull = 20 if $numtopull eq "";
+        $wait=0;		# decide if we wait on input &get_past_entries
+        &get_past_entries;
+      }
+      &get_entry;
+    }
+  }
+}
+
+###
+### edit_entry.
+###
+sub edit_entry {
+  if ($editor eq "builtin") {
+    print "--- . to quit ---\n";
+    while ($input ne ".") {
+      $input = <STDIN>;
+      $output = $output . $input unless $input eq ".\n";
+      chop($input);
+    }
+  # spawn the external editor if not "builtin"
+  } else {
+    # use a basic template to include other stuff
+    if (($template) && !($createdEntry)) {
+      open(TMP,">$tempFile");
+      print TMP "Subject : $subject\n";
+      print TMP "Music   : $music\n";
+      print TMP "Mood    : $mood\n";
+      print TMP "Picture : ";
+      if ($picture) {
+        print TMP "[X] $picture ";
+      }
+      local $whichpic;					# ravi
+      foreach $whichpic (keys(%pickw)) {		# ravi
+        print TMP "[ ] $pickw{$whichpic} " unless $pickw{$whichpic} eq $picture;	# ravi/cf
+      }
+      # this is ghetto, but worx
+      print TMP "\nSecurity: [X] public [ ] friends [ ] private\n" if $security eq "";
+      print TMP "\nSecurity: [ ] public [X] friends [ ] private\n" if $security eq "friends";
+      print TMP "\nSecurity: [ ] public [ ] friends [X] private\n" if $security eq "private";
+      print TMP "Time    : $hour:$minute\n\n";
+      print TMP "$body";
+      close(TMP);
+    }
+    system "$editor $tempFile" unless $express;
+    $createdEntry = 1;
+  }
+}
+
+### 
+### preview.
+###
+sub preview {
+  # do we want to send this? sure we do if $preview is set to 1 but
+  # not if $express is too
+  if (!($express)) {
+    print "--- preview ---------------------\n" if $spellCheck; # makes it more purty with ispell
+    # if internal editor
+    if ($editor eq "builtin") { 
+      print "Subject: $subject\n" if $subject;
+      print "$output";
+      system 'stty', '-echo';
+      print "--- this will be sent (n^M to not send): --- \n";
+      system 'stty', '-echo';
+      $input = <STDIN>; chop($input);
+      print "--- entry not sent ---\n" if $input eq "n";
+      exit if $input eq "n";
+    # if external editor
+    } else {
+      system "$pager $tempFile";
+      while ($key ne ("s") && $key ne ("x")) {
+        $key = ""; 		# clear this var in case we get garbage
+        print "--- s to send | n to not send | e to edit again --- \n";
+        system 'stty', '-echo';
+        $key = <STDIN>; chop($key);
+        system 'stty', '-echo';
+        $key =~ tr/A-Z/a-z/;
+        if ($key eq "n") {	# don't send the entry
+          print "--- entry not sent ---\n";
+          unlink "$tempFile";  # tidy up
+          exit;			# exit out of the program
+        }
+        if ($key eq "e") {
+          &edit_entry;		# edit the entry again
+          &build_body;		# grab the stuff we wrote out
+          &preview;		# call preview again... bad looping here
+        }
+      }
+    }
+  }
+  `mv $tempFile /tmp/lj.$pid.unsent.approved` if -e $tempFile;
+}
+
+###
+### build_body.
+###
+sub build_body {
+  # if we use an external editor build a $output var and parse the extra
+  # info we grab if there is a template
+  if (!($editor eq "builtin")) {
+    open(TMP,"</tmp/lj.$pid.unsent.approved");
+    open(TMP,"<$tempFile");
+    $output = "";
+    $c = 1; # avoid the header if its there
+    while(<TMP>) {
+      if ($template) {
+        if ($_ =~ /Subject/ && !($gotSubject)) {
+          ($g,$_) = split(/: /,$_,2);
+          chop;
+          $subject = substr($_,0,255);
+          $gotSubject = 1;
+        }
+        if ($iTunesMusic ne "" && !($gotMusic)) {
+          $_ = $iTunesMusic;
+        }
+        if ($_ =~ /Music/ && !($gotMusic)) {
+          ($g,$_) = split(/: /,$_,2);
+          chop;
+          $music = $_;
+          $temp = $music;
+          &html_lize($temp); # so we can send +=& in music line
+          $musictosend = "&prop_current_music=$temp";
+          $gotMusic = 1;
+        }
+        if ($_ =~ /Mood/ && !($gotMood)) {
+          ($g,$_) = split(/: /,$_,2);
+          chop;
+          $mood = $_;
+          $temp = $mood;
+	  &html_lize($temp); # so we can send &+= in mood line
+          $moodtosend = "&prop_current_mood=$temp";
+          $gotMood = 1;
+        }
+        # grab whichever picture is checked
+        if ($_ =~ /Picture/ && $picture eq "") {
+          if($_ =~ /\[\S\]\s(\w+)/) {
+            $picture = "$1";
+            $temp = $picture;
+            &html_lize($picture);
+            $picturetosend = "&prop_picture_keyword=$temp"; 
+          }
+        }
+        if ($_ =~ /Time/ && $hour eq "") {
+          ($g,$_) = split(/: /,$_,2);
+          chop;
+          ($hour,$minute) = split(/:/,$_);
+        }
+        # Grab whichever security mode is checked
+        if ($_ =~ /Security/ && $security eq "") {
+          if($_ =~ /\[\S\]\s(\w+)/) {
+            $security = $1;
+          }
+        }
+      }
+      $output = $output . $_ if (($template) && ($c > $sizeOfTemplate));
+      
+      $c++;
+    }
+    close(TMP);
+  }
+  # info icon - this could be expanded to make a webbug function for you
+  # to track visitors to your entries
+  $infoIcon = "<!-- 8v3J-line inserted after editing if not already there --><img align=right src=".'"'."http://nsa.org/~chris/question.gif".'"'." title=".'"'."SFO: $temperature/$conditions/$hostname/$osType/$cv".'"'.">";
+  $output = $output . $infoIcon if !($output =~ /8v3J-line/);
+}
+
+###
+### date_time_string
+###
+sub date_time_string {
+  &get_date if $hour eq ""; # in case someone fudges the date
+  $dateTimeString="&year=$year&mon=$month&day=$day&hour=$hour&min=$minute";
+}
+
+###
+### archive.
+###
+# archive before we connect so later on we can add a way to push
+# back up a connection failure
+sub archive {
+  $archiveName = "$archiveDir/entry.$hour:$minute.$month.$day.$year";
+  print "--- archiving ($archiveName) ---\n" unless $express;
+  open(TMP,">$archiveName");
+  if ($template) {
+    print TMP "Subject : $subject\n";
+    print TMP "Music   : $music\n";
+    print TMP "Mood    : $mood\n";
+    print TMP "Picture : $picture\n";
+    print TMP "Time    : $hour:$minute\n\n";
+  }
+  print TMP $output; 
+  close(TMP);
+}
+
+###
+### open_connection.
+###
+sub open_connection {
+  print "--- opening connection to $server ---\n" unless $express;
+  $sock = new IO::Socket::INET (PeerAddr => $server,
+ 				    PeerPort => 80,
+				    Proto => 'tcp',
+				   );
+  die "--- couldn't connect to $server ($!) ---\n" unless $sock;
+}
+
+###
+### password.
+###
+sub password {
+  unless ($password) {
+    print "--- password: ";
+    system 'stty', '-echo';
+    # get password; fix special chars v2
+    $password = <STDIN>; chop($password);
+    system 'stty', '-echo';
+    print "---\n";
+  }
+}
+
+###
+### send_entry.
+###
+sub send_entry {
+  # date and time; last check
+  &date_time_string;
+  # open a connection
+  &open_connection;
+  # get a password unless its already set to something
+  &password unless($password);
+  # next two lines are so we can send +=& in body (output) and subject
+  &html_lize($output);
+  $body = $output; # hrrrmmmmmm bad bad bad bad
+  &html_lize($subject);
+  # normal updateString
+  $updateString = "mode=postevent&user=$user&password=$password&lineendings=unix$dateTimeString&subject=$subject";
+  # editMode? string
+  $updateString = "mode=editevent&itemid=$itemID&user=$user&password=$password&lineendings=unix$dateTimeString&subject=$subject" if $editMode;
+  $updateString = $updateString . "&event=" . $output;
+  $updateString = $updateString . $moodtosend if ($mood);
+  $updateString = $updateString . $musictosend if ($music);
+  $updateString = $updateString . $picturetosend if ($picture);
+  $updateString = $updateString . "&security=private" if $security eq "private";
+  $updateString = $updateString . "&security=usemask" if $security eq "friends";
+  $updateString = $updateString . "&allowmask=0x1" if $security eq "friends";
+  $l1 = length($updateString);
+
+  # really send it
+  print "--- sending ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$updateString\r
+EOF
+  @input = <$sock>;
+#####
+  print @input;
+  close($sock);
+
+  # some very basic error checking; needs to be fleshed out
+  # 1xx information
+  # 2xx sucess
+  # 3xx redirection
+  # 4xx client error
+  # 5xx server error
+  foreach (@input) {
+    if ($_ =~ /Invalid Password/) {
+      $nope = 1;
+      print "--- incorrect password ---\n";
+    }
+    if ($getItemID) {      # grab the item id; make sure we really posted
+      $itemID = $_;
+      chop($itemID);
+      $getItemID = 0;
+    }
+    if ($_ =~ /itemid/) {   # on the next line grab the item id
+      $getItemID = 1;
+    }
+    if ($errorMessage) {
+       $errorMessage = $_;
+       chop($errorMessage);
+       print "--- Upload error: $errorMessage ---\n";
+       $errorMessage = 0;
+    }
+    if ($_ =~ "errmsg") {
+       $errorMessage = 1;
+    }
+    if ($_ =~ /OK/ && $itemID ne "") {
+      $confirmation = 1;
+    }
+  }
+}
+
+###
+### confirmation.
+### 
+sub confirmation {
+  if ($confirmation) {
+    unless ($nope || $express) {
+      print "--- updated (id: $itemID) ---\n";
+    }
+    if ($updatercfile) {
+      $C = 0;
+      # read it in before we throw it out modified
+      open(TMP,"$rcfile");
+      while(<TMP>) {
+        @rc[$c] = $_;
+        $c++;
+      }
+      close(TMP);
+      # throw the new rcfile out now
+      open(TMP,">$rcfile");
+      foreach (@rc) {
+        if ($_ =~ /num/) {
+          $num++;
+          print TMP "num runs: $num\n";
+        } elsif ($_ =~ /last/) {
+          print TMP "last run: $hour:$minute.$month/$day/$year\n";
+        } else {
+          print TMP $_;
+        }
+      }
+      close(TMP);
+    }
+  } else {
+    print "--- entry not ACK'd by server ---\n";
+  }
+}
+
+### 
+### client_login
+###
+sub client_login {
+  &open_connection;
+  &password;
+  $updateString = "mode=login&user=$user&password=$password&clientversion=$cv&getpickws=1"; # ravi
+  $l1 = length($updateString);
+  print "--- logging client in ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$updateString\r
+EOF
+  @input = <$sock>;
+  # grab the pictures we get back from the "getpickws" argument on updateString
+  foreach $x (@input) {			# ravi
+    chomp($x);				# ravi
+    if($x =~ /pickw_(\d)/) {		# ravi
+      $grab = $1;			# ravi
+      next;				# ravi
+    }					# ravi
+    if($grab ne "") {			# ravi
+      $pickw{$grab} = "$x";		# ravi
+      undef($grab);			# ravi
+    }					# ravi
+  }					# ravi
+  close($sock);
+}
+
+###
+### spell_check
+###
+sub spell_check {
+  system "$spellCheckProgram $tempFile" unless $express;
+}
+
+###
+### clean_up
+###
+sub clean_up {
+  system "rm -rf /tmp/lj.*.approved";
+}
+
+###
+### un_html_lize
+###
+### this sub swaps out special chars to allow us to display them properly
+### when editing a previous entry. these must be done in a specific order
+### or we will end up breaking % and & 
+###
+sub un_html_lize {
+  local($whaToFix);
+  $whatToFix = @_[0]; # this is the var passed into this function
+  $whatToFix =~ s/\+/ /g;   $whatToFix =~ s/%0D%0A/\n/g;
+  $whatToFix =~ s/%27/\'/g; $whatToFix =~ s/%09/\	/g;
+  $whatToFix =~ s/%2B/\+/g; $whatToFix =~ s/%28/\(/g;
+  $whatToFix =~ s/%29/\)/g; $whatToFix =~ s/%3F/\?/g;
+  $whatToFix =~ s/%21/\!/g; $whatToFix =~ s/%22/\"/g;
+  $whatToFix =~ s/%3D/\=/g; $whatToFix =~ s/%2A/\*/g;
+  $whatToFix =~ s/%3E/\>/g; $whatToFix =~ s/%3C/\</g;
+  $whatToFix =~ s/%3B/\;/g; $whatToFix =~ s/%40/\@/g;
+  $whatToFix =~ s/%23/\#/g; $whatToFix =~ s/%24/\$/g;
+  $whatToFix =~ s/%5E/\^/g; $whatToFix =~ s/%7B/\{/g;
+  $whatToFix =~ s/%5B/\[/g; $whatToFix =~ s/%7D/\}/g;
+  $whatToFix =~ s/%5D/\]/g; $whatToFix =~ s/%7C/\|/g;
+  $whatToFix =~ s/%60/\`/g; $whatToFix =~ s/%7E/\~/g;
+  $whatToFix =~ s/%26/\&/g; $whatToFix =~ s/%25/\%/g;
+  @_[0] = $whatToFix;			# return fixed output
+}
+
+###
+### html_lize
+###
+### this sub swaps out special chars to allow us to send them up properly over
+### http; these must be done in a specific order or things can break % must be
+### last or we will end up breaking the other swapouts
+###
+sub html_lize {
+  local($whaToFix);
+  $whatToFix = @_[0]; # this is the var passed into this function
+  $whatToFix =~ s/\n/\r\n/mg;
+  $whatToFix =~ s/=/\%3D/g;
+  $whatToFix =~ s/&/\%26/g;
+  $whatToFix =~ s/\+/\%2B/g;
+  $whatToFix =~ s/\'/\%27/g;
+  $whatToFix =~ s/\#/\%23/g;
+  $whatToFix =~ s/\`/\%60/g;
+  $whatToFix =~ s/\%[A-z]/\%37/g;
+  @_[0] = $whatToFix;			# return the newly fixed input 
+}
+
+###
+### check_unsent_entries
+###
+#   check for unsent entries in /tmp and if found... send them
+sub check_unsent_entries {
+  # just use an ls instead of opendir since we search for
+  # specific files. we use .approved to make sure it has been
+  # through preview. this means preview is mandatory for now
+### BROKED BROKED BROKED BROKED
+#  @old_entries = `sh -c 'ls /tmp/lj.*.approved' 2> /dev/null`;
+  $safeTempFile=$tempFile;	# save a safe filename
+  if (@old_entries) { 
+  foreach (@old_entries) {	# push up each ...aproved entry in /tmp
+    $tempFile = $_; chop ($tempFile);
+    print "--- pushing up leftover entry ($tempFile)---\n" unless $express;
+    &build_body;
+    &send_entry;
+    system "rm $tempFile";	# using rm here because unlink is weird
+    $wait = 1;			# we wait
+  }
+  }
+  if ($wait eq 1) {	# make sure that old_entries really has some stuff
+    print "--- old entries pushed up ^M to continue ---\n" unless $express;
+    $wait = <STDIN>;
+  }
+  &zero_out;			# i think we need this here 000
+  $tempFile = $safeTempFile;	# restore the safe filename
+#exit;
+}
+
+###
+### Parse weather we grab from the NWS with lynx
+### this is super ghetto right now
+###
+sub parse_weather {
+  print "--- pulling weather info ---\n" unless $express;
+  @weatherPage = `lynx -dump "$weatherURL"`;
+  $go = 0;
+  foreach(@weatherPage) {
+    if ($go eq 2) {
+      $temperature = $_;
+      $temperature =~ s/  //g;
+      $temperature =~ s/°//g;
+      chop($temperature);
+      $go = 0;
+    }
+    if ($go eq 1) {
+      $conditions = $_;
+      $conditions =~ s/  //g;
+      chop($conditions);
+      $go = 2;
+    }
+    $go = 1 if $_ =~ /Last Update/;
+  }
+}
+
+###
+### Check to see if our friends have updated.
+###
+sub check_friends {
+  # parse out last run from the rcfile, the save format in the rcfile should
+  # be changed to match the ljformat
+  $lastRun =~ s/ //g;
+  $lastRun =~ s/\.//g;
+  $hour = substr($lastRun,0,2);
+  $minute = substr($lastRun,3,2);
+  $date = substr($lastRun,5,length($lastRun));
+  ($month, $day, $year) = split(/\//,$date,3);
+  $lastRun = "$year-$month-$day $hour:$minute:00";
+  # open a connection
+  &open_connection;
+  # get a password unless its already set to something
+  &password unless($password);
+  # what to pass
+  $passToLJ = "mode=checkfriends&user=$user&password=$password&lastupdate=$lastRun";
+  $l1 = length($passToLJ);
+  # check for new friends entries
+  print "--- checking for new friend's entries ---\n" unless $express;
+  print $sock <<EOF;
+POST /cgi-bin/log.cgi HTTP/1.0\r
+Host: $server\r
+Content-type: multipart/form-data\r
+Content-length: $l1\r
+\r
+$passToLJ\r
+EOF
+  @input = <$sock>;
+  $c = 0;
+  foreach (@input) {
+    if ($_ =~ /interval/) {
+      $interval = @input[$c+1];
+      $interval =~ s/\n//;
+      print "--- please don't check again for $interval seconds ---\n";
+    }
+    if ($_ =~ /new/) {
+      $newFriendsEntries = 1;
+      print "--- new friends entries! ---\n";
+    }
+  $c++;
+  }
+  if (!($newFriendsEntries)) {
+    print "--- sorry no new friend's entries ---\n";
+  }
+}
+
+###
+### ping_database;
+###
+### check and make sure the database is up if the client wants to backup
+### entries to it. 
+###
+sub ping_database {
+   print "--- checking connectivity to backupDB: $dbName ---\n" unless $express;
+   $dbConnect = DBI->connect("dbi:Pg:dbname=$dbName") || die "--- ERROR Connecting to backupDB: $DBI::errstr";
+   $dbConnect->disconnect();
+}
+
+###
+### create_table;
+###
+### Connects a database and creates the appropriate table for backing entries
+### up.
+### 
+sub create_table {
+   print "--- creating a table called: $tblName in database: $dbName ---\n";
+   $dbConnect = DBI->connect("dbi:Pg:dbname=$dbName");
+   $dbTableCreation = $dbConnect->prepare("CREATE TABLE $tblName (auto_id SERIAL, ljitem INT, subject VARCHAR(100), music VARCHAR(100), mood VARCHAR(100), picture VARCHAR(100), year INT, month INT, day INT, hour INT, minute INT, security VARCHAR(30), text TEXT);") || die "--- ERROR Creating table: $DBI:errstr";
+   $dbTableCreation->execute;
+   $dbConnect->disconnect();
+   print "--- table creation done ---\n";
+}
+
+###
+### sql_backup;
+###
+### for this to work the client expects a table called entries in a database
+### called ljentries. this will probably be changed shortly to be portable.
+###
+### Table format expected: (there will be an option to output this)
+### CREATE TABLE entries (
+### auto_id SERIAL,
+### ljitem INT,
+### subject VARCHAR(100),
+### music VARCHAR(100),
+### mood VARCHAR(100),
+### picture VARCHAR(100),
+### year INT,
+### month INT,
+### day INT,
+### hour INT,
+### miunte INT,
+### security VARCHAR(30),
+### text TEXT;
+### );
+###
+sub sql_backup {
+   $mangledOutput = $output;
+   $music = substr($music,0,99) if length($music) > 99;
+   # the Pg commands make heavy use of ' so escape any we have in the body
+   $mangledOutput =~ s/\'/\\\'/g;
+   $dbConnect = DBI->connect("dbi:Pg:dbname=$dbName");
+   # here we see if we are called to load lots of entries from an XML file
+   if ($batchLoad) {
+      # check and see if the rows already exist with a valid lj itemID
+      $dbCheck = $dbConnect->prepare("SELECT * FROM $tblName WHERE ljitem='$itemID'");
+      $dbCheck->execute;
+      $dbCheckResult = $dbCheck->fetchrow;
+      $dbCheck->finish;
+      if ($dbCheckResult eq "") {
+         # no rows exist that match so we will forward on to row creation
+         $batchLoad = 0;
+      } else {
+         # got a matching row so let's update it
+         print "--- updating backupDB: $dbName:$tblName ---\n" unless $express;
+         $dbInsert = $dbConnect->prepare("UPDATE $tblName SET ljitem='$itemID', subject='$subject', music='$music', mood='$mood', picture='$picture', security='$security', text='$mangledOutput' WHERE ljitem='$itemID'");
+       } 
+   }
+   if ($sequenceID) {
+      print "--- updating backupDB: $dbName:$tblName ---\n" unless $express;
+      $dbInsert = $dbConnect->prepare("UPDATE $tblName SET ljitem='$itemID', subject='$subject', music='$music', mood='$mood', picture='$picture', security='$security', text='$mangledOutput' WHERE auto_id='$sequenceID'");
+      $updatedEntryInDB = 1; 
+      $dbInsert->execute;
+    } 
+    # we don't wanna create a row unless we have to on batchloads
+    if (!($batchLoad) && !($updatedEntryInDB)) {
+       print "--- creating row in backupDB: $dbName:$tblName ---\n" unless $express;
+       $dbInsert = $dbConnect->prepare("INSERT INTO $tblName (ljitem,subject,music,mood,picture,year,month,day,hour,minute,security,text) VALUES ('$itemID','$subject','$music','$mood','$picture','$year','$month','$day','$hour','$minute','$security','$mangledOutput')");
+      $dbInsert->execute;
+      #print "---$mangledOutput---" if $dbInsert > 1;
+   }
+   $dbConnect->disconnect();
+}
+
+###
+### parse_XML
+###
+### this routine will take an XML file generated by the lj servers and then
+### bulk load it into a database
+###
+sub parse_XML {
+   print "--- Acting on file: $XMLFile ---\n" unless $express;
+   print "--- Loading entries in database $dbName:$tblName ---\n" unless $express;
+   # quick and dirty parsing of the XML file
+   open(IN,"$XMLFile") || die "--- File $XMLFile not found! ---\n";
+   while(<IN>) {
+      # grab the data inside of the < >s
+      ($g,$XMLTag) = split(/>/,$_,2);
+      ($XMLTag,$g) = split(/<\//,$XMLTag,2);
+      if ($_ =~ /itemid/) {
+         $itemID = $XMLTag;
+      }
+      if ($_ =~ /subject/) {
+         $subject = $XMLTag;
+      }
+      if ($_ =~ /security/) {
+         $security = $XMLTag;
+      }
+      if ($_ =~ /music/) {
+         $music = $XMLTag;
+      }
+      if ($_ =~ /music/) {
+         $music = $XMLTag;
+      }
+      if ($_ =~ /mood/) {
+         $mood = $XMLTag;
+      }
+      if ($_ =~ /eventtime/) {
+         ($date,$time) = split(/ /,$XMLTag);
+         ($year,$month,$day) = split(/-/,$date);
+         ($hour,$minute) = split(/:/,$time);
+      }
+      # put everything into one big string
+      $output = $output . $_;
+      if ($_ =~/\/event\>/) {
+          # now just take what is between the event tags
+         ($g,$output) = split(/<event\>/,$output);
+         ($output,$g) = split(/<\/event\>/,$output);
+         $batchLoad = 1;
+         &sql_backup;
+         print "--- entry $itemID loaded ---\n" unless $express;
+         $output = "";
+      } 
+      $XMLTag="";
+   }
+   close(IN);
+}
+
+###
+### now_playing.
+###
+### grab information out of itunes using applescript to populate the music
+### field if so specified
+###
+sub now_playing {
+   # let the user override
+   if ($music =~ /.iTunes/) {
+       $music = "";
+       $checkiTunes = 1;
+   }
+   # make sure iTunes is running before calling it (unix only)
+   $iTunesRunning = `ps auxwww|grep -i itunes|grep -v grep`;
+   chop($iTunesRunning);
+   if ($music eq "" && ($checkiTunes)) {
+      # Call out to iTunes to get some data
+      $iTunesPlaying = `osascript -e 'tell application "iTunes" to player state as string'` if $iTunesRunning =~ /unes/;
+      chop($iTunesPlaying);
+      if ($iTunesPlaying eq "playing") {
+         print "--- pulling music info from iTunes (laggy) ---\n" unless $express;
+         $currentTrack = `osascript -e 'tell application "iTunes" to artist of current track as string'`;
+         $currentArtist= `osascript -e 'tell application "iTunes" to name of current track as string'`;
+         chop($currentTrack);
+         $iTunesMusic = "Music : $currentTrack - $currentArtist";
+      }
+   }
+}
+
+###
+### MAIN.
+###
+&zero_out;				# set known values to VARs
+&check_for_rcfile;			# check for a config file
+&parse_rcfile;				# figure out our configuration
+&check_unsent_entries;			# entries left from LJ downtime;TBCU
+&check_args;				# currently a catch all for stuff;TBCU
+#&ping_database if ($dbBackup);		# make sure backupDB is up
+&client_login if ($clogin) && (!($editMode)); # login our client (useless)
+&parse_weather if $getWeather;		# get some weather
+&edit_entry;				# actually edit the entry
+&spell_check if ($spellCheck);		# spellcheck that sucker
+&now_playing if ($onMac);		# to be expanded
+&build_body;				# prepare everything to upload
+&preview if ($preview);			# show the user what they have made
+&archive if ($archive);			# text based backup
+&send_entry;				# upload to servers
+#&sql_backup if ($dbBackup);		# send via SQL to backupDB
+&clean_up;				# housekeeping
+&confirmation;				# followup?
